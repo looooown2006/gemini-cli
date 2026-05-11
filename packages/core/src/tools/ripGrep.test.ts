@@ -25,12 +25,22 @@ import { PassThrough, Readable } from 'node:stream';
 import EventEmitter from 'node:events';
 import { createMockMessageBus } from '../test-utils/mock-message-bus.js';
 import { fileExists } from '../utils/fileUtils.js';
+import { resolveExecutable } from '../utils/shell-utils.js';
 
 vi.mock('../utils/fileUtils.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../utils/fileUtils.js')>();
   return {
     ...actual,
     fileExists: vi.fn(),
+  };
+});
+
+vi.mock('../utils/shell-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/shell-utils.js')>();
+  return {
+    ...actual,
+    resolveExecutable: vi.fn(),
   };
 });
 
@@ -2004,8 +2014,18 @@ describe('getRipgrepPath', () => {
       );
     });
 
-    it('should return null if binary is missing from both paths', async () => {
+    it('should fall back to system PATH if both bundled paths are missing', async () => {
       vi.mocked(fileExists).mockResolvedValue(false);
+      vi.mocked(resolveExecutable).mockResolvedValue('/usr/local/bin/rg');
+
+      const resolvedPath = await getRipgrepPath();
+      expect(resolvedPath).toBe('/usr/local/bin/rg');
+      expect(resolveExecutable).toHaveBeenCalledWith('rg');
+    });
+
+    it('should return null if binary is missing from both bundled paths and system PATH', async () => {
+      vi.mocked(fileExists).mockResolvedValue(false);
+      vi.mocked(resolveExecutable).mockResolvedValue(undefined);
 
       const resolvedPath = await getRipgrepPath();
       expect(resolvedPath).toBeNull();
