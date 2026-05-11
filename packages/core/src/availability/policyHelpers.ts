@@ -25,6 +25,7 @@ import {
   DEFAULT_GEMINI_MODEL,
   PREVIEW_GEMINI_MODEL_AUTO,
   isAutoModel,
+  isGemini2Model,
   isGemini3Model,
   resolveModel,
 } from '../config/models.js';
@@ -64,6 +65,15 @@ export function resolvePolicyChain(
     ? isAutoModel(preferredModel, config)
     : false;
   const isAutoConfigured = isAutoModel(configuredModel, config);
+
+  // We always wrap around for family-based chains to ensure maximum availability
+  // between models in the same family (e.g. fallback to Pro if Flash is exhausted).
+  const effectiveWrapsAround =
+    wrapsAround ||
+    isAutoPreferred ||
+    isAutoConfigured ||
+    isGemini3Model(resolvedModel, config) ||
+    isGemini2Model(resolvedModel);
 
   // --- DYNAMIC PATH ---
   if (config.getExperimentalDynamicModelConfiguration?.() === true) {
@@ -110,7 +120,7 @@ export function resolvePolicyChain(
       // No matching modelChains found, default to single model chain
       chain = createSingleModelChain(modelFromConfig);
     }
-    chain = applyDynamicSlicing(chain, resolvedModel, wrapsAround);
+    chain = applyDynamicSlicing(chain, resolvedModel, effectiveWrapsAround);
   } else {
     // --- LEGACY PATH ---
 
@@ -150,7 +160,7 @@ export function resolvePolicyChain(
     } else {
       chain = createSingleModelChain(modelFromConfig);
     }
-    chain = applyDynamicSlicing(chain, resolvedModel, wrapsAround);
+    chain = applyDynamicSlicing(chain, resolvedModel, effectiveWrapsAround);
   }
   // Apply Unified Silent Injection for Plan Mode with defensive checks
   if (config?.getApprovalMode?.() === ApprovalMode.PLAN) {

@@ -163,6 +163,16 @@ export class NumericalClassifierStrategy implements RoutingStrategy {
         config,
       );
 
+      const service = config.getModelAvailabilityService();
+      const snapshot = service.snapshot(selectedModel);
+
+      if (!snapshot.available) {
+        debugLogger.warn(
+          `[Routing] Numerical classifier selected unavailable model ${selectedModel} (${snapshot.reason}). Bypassing.`,
+        );
+        return null;
+      }
+
       const latencyMs = Date.now() - startTime;
 
       return {

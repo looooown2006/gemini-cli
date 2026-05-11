@@ -24,6 +24,7 @@ import type { ResolvedModelConfig } from '../../services/modelConfigService.js';
 import { debugLogger } from '../../utils/debugLogger.js';
 import type { LocalLiteRtLmClient } from '../../core/localLiteRtLmClient.js';
 import { AuthType } from '../../core/contentGenerator.js';
+import { ModelAvailabilityService } from '../../availability/modelAvailabilityService.js';
 
 vi.mock('../../core/baseLlmClient.js');
 
@@ -68,6 +69,9 @@ describe('NumericalClassifierStrategy', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({
         authType: AuthType.LOGIN_WITH_GOOGLE,
       }),
+      getModelAvailabilityService: vi
+        .fn()
+        .mockReturnValue(new ModelAvailabilityService()),
     } as unknown as Config;
     mockBaseLlmClient = {
       generateJson: vi.fn(),
@@ -602,6 +606,54 @@ describe('NumericalClassifierStrategy', () => {
       );
 
       expect(decision?.model).toBe(PREVIEW_GEMINI_3_1_MODEL);
+    });
+  });
+
+  describe('availability-aware routing', () => {
+    it('should bypass NumericalClassifier if it chooses an exhausted model', async () => {
+      const availabilityService = mockConfig.getModelAvailabilityService();
+      // Mark Flash as exhausted
+      availabilityService.markTerminal(PREVIEW_GEMINI_FLASH_MODEL, 'quota');
+
+      const mockApiResponse = {
+        complexity_reasoning: 'Standard task',
+        complexity_score: 80, // Would normally route to Flash
+      };
+      vi.mocked(mockBaseLlmClient.generateJson).mockResolvedValue(
+        mockApiResponse,
+      );
+
+      const decision = await strategy.route(
+        mockContext,
+        mockConfig,
+        mockBaseLlmClient,
+        mockLocalLiteRtLmClient,
+      );
+
+      expect(decision).toBeNull();
+    });
+
+    it('should NOT bypass if it chooses an available model, even if another family member is exhausted', async () => {
+      const availabilityService = mockConfig.getModelAvailabilityService();
+      // Mark Flash as exhausted, but classifier will choose Pro
+      availabilityService.markTerminal(PREVIEW_GEMINI_FLASH_MODEL, 'quota');
+
+      const mockApiResponse = {
+        complexity_reasoning: 'Complex task',
+        complexity_score: 95, // Routes to Pro
+      };
+      vi.mocked(mockBaseLlmClient.generateJson).mockResolvedValue(
+        mockApiResponse,
+      );
+
+      const decision = await strategy.route(
+        mockContext,
+        mockConfig,
+        mockBaseLlmClient,
+        mockLocalLiteRtLmClient,
+      );
+
+      expect(decision?.model).toBe(PREVIEW_GEMINI_MODEL);
     });
   });
 });

@@ -187,6 +187,16 @@ export class ClassifierStrategy implements RoutingStrategy {
         config,
       );
 
+      const service = config.getModelAvailabilityService();
+      const snapshot = service.snapshot(selectedModel);
+
+      if (!snapshot.available) {
+        debugLogger.warn(
+          `[Routing] Classifier selected unavailable model ${selectedModel} (${snapshot.reason}). Bypassing.`,
+        );
+        return null;
+      }
+
       return {
         model: selectedModel,
         metadata: {

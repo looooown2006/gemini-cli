@@ -10,6 +10,7 @@ import {
   buildFallbackPolicyContext,
   applyModelSelection,
   applyAvailabilityTransition,
+  selectModelForAvailability,
 } from './policyHelpers.js';
 import { createDefaultPolicy, SILENT_ACTIONS } from './policyCatalog.js';
 import type { RetryAvailabilityContext } from './modelPolicy.js';
@@ -19,11 +20,13 @@ import {
   DEFAULT_GEMINI_MODEL_AUTO,
   PREVIEW_GEMINI_3_1_CUSTOM_TOOLS_MODEL,
   PREVIEW_GEMINI_3_1_MODEL,
+  PREVIEW_GEMINI_FLASH_MODEL,
 } from '../config/models.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { ModelConfigService } from '../services/modelConfigService.js';
 import { DEFAULT_MODEL_CONFIGS } from '../config/defaultModelConfigs.js';
 import { ApprovalMode } from '../policy/types.js';
+import { ModelAvailabilityService } from './modelAvailabilityService.js';
 
 const createMockConfig = (overrides: Partial<Config> = {}): Config => {
   const config = {
@@ -99,8 +102,9 @@ describe('policyHelpers', () => {
         getModel: () => DEFAULT_GEMINI_MODEL_AUTO,
       });
       const chain = resolvePolicyChain(config, 'gemini-2.5-flash');
-      expect(chain).toHaveLength(1);
+      expect(chain).toHaveLength(2);
       expect(chain[0]?.model).toBe('gemini-2.5-flash');
+      expect(chain[1]?.model).toBe('gemini-2.5-pro');
     });
 
     it('returns flash-lite chain when preferred model is flash-lite', () => {
@@ -487,6 +491,153 @@ describe('policyHelpers', () => {
       expect(mockService.consumeStickyAttempt).toHaveBeenCalledWith(
         'test-model',
       );
+    });
+  });
+
+  describe('selectModelForAvailability with Gemini family fallback', () => {
+    it('honors explicit Pro selection even when Flash is exhausted', () => {
+      const availabilityService = new ModelAvailabilityService();
+      availabilityService.markTerminal(PREVIEW_GEMINI_FLASH_MODEL, 'quota');
+
+      const config = createMockConfig({
+        getModelAvailabilityService: () => availabilityService,
+        getGemini31LaunchedSync: () => true,
+      });
+
+      const result = selectModelForAvailability(
+        config,
+        PREVIEW_GEMINI_3_1_MODEL,
+      );
+
+      expect(result.selectedModel).toBe(PREVIEW_GEMINI_3_1_MODEL);
+      expect(result.skipped).toEqual([]);
+    });
+
+    it('falls back to Pro if a tool explicitly requests Flash but Flash is exhausted', () => {
+      const availabilityService = new ModelAvailabilityService();
+      availabilityService.markTerminal(PREVIEW_GEMINI_FLASH_MODEL, 'quota');
+
+      const config = createMockConfig({
+        getModelAvailabilityService: () => availabilityService,
+        getGemini31LaunchedSync: () => true,
+      });
+
+      const result = selectModelForAvailability(
+        config,
+        PREVIEW_GEMINI_FLASH_MODEL,
+      );
+
+      expect(result.selectedModel).toBe(PREVIEW_GEMINI_3_1_MODEL);
+      expect(result.skipped).toEqual([
+        { model: PREVIEW_GEMINI_FLASH_MODEL, reason: 'quota' },
+      ]);
+    });
+
+    it('traverses multiple exhaustions in Gemini 3 chain', () => {
+      const availabilityService = new ModelAvailabilityService();
+      availabilityService.markTerminal(PREVIEW_GEMINI_3_1_MODEL, 'quota');
+
+      const config = createMockConfig({
+        getModelAvailabilityService: () => availabilityService,
+        getGemini31LaunchedSync: () => true,
+      });
+
+      const result = selectModelForAvailability(config, 'auto-gemini-3');
+
+      expect(result.selectedModel).toBe(PREVIEW_GEMINI_FLASH_MODEL);
+      expect(result.skipped).toEqual([
+        { model: PREVIEW_GEMINI_3_1_MODEL, reason: 'quota' },
+      ]);
+
+      availabilityService.markTerminal(PREVIEW_GEMINI_FLASH_MODEL, 'quota');
+      const result2 = selectModelForAvailability(config, 'auto-gemini-3');
+
+      // Flash is last resort in this chain
+      expect(result2.selectedModel).toBe(PREVIEW_GEMINI_FLASH_MODEL);
+      expect(result2.skipped).toEqual([]);
+    });
+
+    it('falls back within Gemini 2.5 family (Lite -> Flash -> Pro)', () => {
+      const availabilityService = new ModelAvailabilityService();
+      availabilityService.markTerminal(
+        DEFAULT_GEMINI_FLASH_LITE_MODEL,
+        'quota',
+      );
+
+      const config = createMockConfig({
+        getModelAvailabilityService: () => availabilityService,
+        getModel: () => DEFAULT_GEMINI_FLASH_LITE_MODEL,
+      });
+
+      const result = selectModelForAvailability(
+        config,
+        DEFAULT_GEMINI_FLASH_LITE_MODEL,
+      );
+
+      // Lite is exhausted, should fallback to Flash
+      expect(result.selectedModel).toBe('gemini-2.5-flash');
+      expect(result.skipped).toEqual([
+        { model: DEFAULT_GEMINI_FLASH_LITE_MODEL, reason: 'quota' },
+      ]);
+
+      availabilityService.markTerminal('gemini-2.5-flash', 'quota');
+      const result2 = selectModelForAvailability(
+        config,
+        DEFAULT_GEMINI_FLASH_LITE_MODEL,
+      );
+
+      // Lite and Flash exhausted, should fallback to Pro
+      expect(result2.selectedModel).toBe('gemini-2.5-pro');
+      expect(result2.skipped).toEqual([
+        { model: DEFAULT_GEMINI_FLASH_LITE_MODEL, reason: 'quota' },
+        { model: 'gemini-2.5-flash', reason: 'quota' },
+      ]);
+    });
+
+    it('does NOT wrap around for non-Gemini custom models', () => {
+      const availabilityService = new ModelAvailabilityService();
+      availabilityService.markTerminal('my-custom-model', 'quota');
+
+      const config = createMockConfig({
+        getModelAvailabilityService: () => availabilityService,
+      });
+
+      const result = selectModelForAvailability(config, 'my-custom-model');
+
+      // Custom models have a single-model chain and no wrapsAround.
+      // It should still return the requested model as last resort.
+      expect(result.selectedModel).toBe('my-custom-model');
+      expect(result.skipped).toEqual([]);
+    });
+
+    it('honors family fallback when ApprovalMode is PLAN', () => {
+      const availabilityService = new ModelAvailabilityService();
+      availabilityService.markTerminal(PREVIEW_GEMINI_FLASH_MODEL, 'quota');
+
+      const modelConfigService = new ModelConfigService(DEFAULT_MODEL_CONFIGS);
+
+      const config = createMockConfig({
+        getModelAvailabilityService: () => availabilityService,
+        getGemini31LaunchedSync: () => true,
+        getApprovalMode: () => ApprovalMode.PLAN,
+        modelConfigService,
+        setActiveModel: vi.fn(),
+      });
+
+      const result = selectModelForAvailability(
+        config,
+        PREVIEW_GEMINI_FLASH_MODEL,
+      );
+
+      // Should still fallback to Pro
+      expect(result.selectedModel).toBe(PREVIEW_GEMINI_3_1_MODEL);
+
+      // Verify actions are silent (via applyModelSelection which uses selectModelForAvailability)
+      const selection = applyModelSelection(config, {
+        model: PREVIEW_GEMINI_FLASH_MODEL,
+        isChatModel: true,
+      });
+      expect(selection.model).toBe(PREVIEW_GEMINI_3_1_MODEL);
     });
   });
 });
